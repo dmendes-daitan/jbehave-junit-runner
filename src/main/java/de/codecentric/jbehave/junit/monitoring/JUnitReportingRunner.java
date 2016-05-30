@@ -10,7 +10,9 @@ import org.jbehave.core.ConfigurableEmbedder;
 import org.jbehave.core.configuration.Configuration;
 import org.jbehave.core.embedder.Embedder;
 import org.jbehave.core.embedder.EmbedderControls;
-import org.jbehave.core.embedder.StoryRunner;
+import org.jbehave.core.embedder.PerformableTree;
+import org.jbehave.core.embedder.PerformableTree.RunContext;
+import org.jbehave.core.failures.BatchFailures;
 import org.jbehave.core.io.StoryPathResolver;
 import org.jbehave.core.junit.JUnitStories;
 import org.jbehave.core.junit.JUnitStory;
@@ -40,6 +42,7 @@ public class JUnitReportingRunner extends BlockJUnit4ClassRunner {
 			throws Throwable {
 		super(testClass);
 		configurableEmbedder = testClass.newInstance();
+		configuredEmbedder = configurableEmbedder.configuredEmbedder();
 
 		if (configurableEmbedder instanceof JUnitStories) {
 			getStoryPathsFromJUnitStories(testClass);
@@ -81,9 +84,9 @@ public class JUnitReportingRunner extends BlockJUnit4ClassRunner {
 				// tell the reporter how to handle pending steps
 				junitReporter.usePendingStepStrategy(configuration
 						.pendingStepStrategy());
-			
+
 				addToStoryReporterFormats(junitReporter);
-			
+
 				try {
 					configuredEmbedder.runStoriesAsPaths(storyPaths);
 				} catch (Throwable e) {
@@ -94,7 +97,7 @@ public class JUnitReportingRunner extends BlockJUnit4ClassRunner {
 			}
 		};
 	}
-	
+
 	public static EmbedderControls recommandedControls(Embedder embedder) {
 		return recommendedControls(embedder);
 	}
@@ -112,7 +115,7 @@ public class JUnitReportingRunner extends BlockJUnit4ClassRunner {
 	private void createCandidateStepsWith(StepMonitor stepMonitor) {
 		// reset step monitor and recreate candidate steps
 		configuration.useStepMonitor(stepMonitor);
-		getCandidateSteps();
+		candidateSteps = getCandidateSteps();
 		for (CandidateSteps step : candidateSteps) {
 			step.configuration().useStepMonitor(stepMonitor);
 		}
@@ -125,7 +128,6 @@ public class JUnitReportingRunner extends BlockJUnit4ClassRunner {
 	}
 
 	private void getStoryPathsFromJUnitStory() {
-		configuredEmbedder = configurableEmbedder.configuredEmbedder();
 		StoryPathResolver resolver = configuredEmbedder.configuration()
 				.storyPathResolver();
 		storyPaths = Arrays.asList(resolver.resolve(configurableEmbedder
@@ -137,39 +139,39 @@ public class JUnitReportingRunner extends BlockJUnit4ClassRunner {
 			Class<? extends ConfigurableEmbedder> testClass)
 			throws NoSuchMethodException, IllegalAccessException,
 			InvocationTargetException {
-		configuredEmbedder = configurableEmbedder.configuredEmbedder();
 		Method method = makeStoryPathsMethodPublic(testClass);
 		storyPaths = ((List<String>) method.invoke(
 				(JUnitStories) configurableEmbedder, (Object[]) null));
 	}
 
-	private Method makeStoryPathsMethodPublic(
-			Class<? extends ConfigurableEmbedder> testClass)
+	@SuppressWarnings("unchecked")
+    private static Method makeStoryPathsMethodPublic(Class<? extends ConfigurableEmbedder> clazz)
 			throws NoSuchMethodException {
-		Method method;
 		try {
-			method = testClass.getDeclaredMethod("storyPaths", (Class[]) null);
+			Method method = clazz.getDeclaredMethod("storyPaths", (Class[]) null);
+			method.setAccessible(true);
+			return method;
 		} catch (NoSuchMethodException e) {
-			method = testClass.getMethod("storyPaths", (Class[]) null);
+			Class<?> superclass = clazz.getSuperclass();
+			if (superclass != null && ConfigurableEmbedder.class.isAssignableFrom(superclass)) {
+				return makeStoryPathsMethodPublic((Class<? extends ConfigurableEmbedder>) superclass);
+			}
+			throw e;
 		}
-		method.setAccessible(true);
-		return method;
 	}
 
-	private void getCandidateSteps() {
-		// candidateSteps = configurableEmbedder.configuredEmbedder()
-		// .stepsFactory().createCandidateSteps();
-		InjectableStepsFactory stepsFactory = configurableEmbedder
-				.stepsFactory();
+	private List<CandidateSteps> getCandidateSteps() {
+		List<CandidateSteps> candidateSteps;
+		InjectableStepsFactory stepsFactory = configurableEmbedder.stepsFactory();
 		if (stepsFactory != null) {
 			candidateSteps = stepsFactory.createCandidateSteps();
 		} else {
-			Embedder embedder = configurableEmbedder.configuredEmbedder();
-			candidateSteps = embedder.candidateSteps();
+			candidateSteps = configuredEmbedder.candidateSteps();
 			if (candidateSteps == null || candidateSteps.isEmpty()) {
-				candidateSteps = embedder.stepsFactory().createCandidateSteps();
+				candidateSteps = configuredEmbedder.stepsFactory().createCandidateSteps();
 			}
 		}
+		return candidateSteps;
 	}
 
 	private void initRootDescription() {
@@ -191,11 +193,10 @@ public class JUnitReportingRunner extends BlockJUnit4ClassRunner {
 	private List<Description> buildDescriptionFromStories() {
 		JUnitDescriptionGenerator descriptionGenerator = new JUnitDescriptionGenerator(
 				candidateSteps, configuration);
-		StoryRunner storyRunner = new StoryRunner();
-		List<Description> storyDescriptions = new ArrayList<Description>();
+		List<Description> storyDescriptions = new ArrayList<>();
 
 		addSuite(storyDescriptions, "BeforeStories");
-		addStories(storyDescriptions, storyRunner, descriptionGenerator);
+		storyDescriptions.addAll(descriptionGenerator.createDescriptionFrom(createPerformableTree()));
 		addSuite(storyDescriptions, "AfterStories");
 
 		numberOfTestCases += descriptionGenerator.getTestCases();
@@ -203,19 +204,25 @@ public class JUnitReportingRunner extends BlockJUnit4ClassRunner {
 		return storyDescriptions;
 	}
 
-	private void addStories(List<Description> storyDescriptions,
-			StoryRunner storyRunner, JUnitDescriptionGenerator gen) {
+	private PerformableTree createPerformableTree() {
+		BatchFailures failures = new BatchFailures(configuredEmbedder.embedderControls().verboseFailures());
+		PerformableTree performableTree = new PerformableTree();
+		RunContext context = performableTree.newRunContext(configuration, configuredEmbedder.stepsFactory(),
+				configuredEmbedder.embedderMonitor(), configuredEmbedder.metaFilter(), failures);
+		performableTree.addStories(context, storiesOf(performableTree, storyPaths));
+		return performableTree;
+	}
+
+	private List<Story> storiesOf(PerformableTree performableTree, List<String> storyPaths) {
+		List<Story> stories = new ArrayList<>();
 		for (String storyPath : storyPaths) {
-			Story parseStory = storyRunner
-					.storyOfPath(configuration, storyPath);
-			Description descr = gen.createDescriptionFrom(parseStory);
-			storyDescriptions.add(descr);
+			stories.add(performableTree.storyOfPath(configuration, storyPath));
 		}
+		return stories;
 	}
 
 	private void addSuite(List<Description> storyDescriptions, String name) {
-		storyDescriptions.add(Description.createTestDescription(Object.class,
-				name));
+		storyDescriptions.add(Description.createSuiteDescription(name));
 		numberOfTestCases++;
 	}
 }

@@ -9,6 +9,7 @@ import org.jbehave.core.configuration.Keywords;
 import org.jbehave.core.failures.FailingUponPendingStep;
 import org.jbehave.core.failures.PendingStepStrategy;
 import org.jbehave.core.failures.UUIDExceptionWrapper;
+import org.jbehave.core.model.Scenario;
 import org.jbehave.core.model.Story;
 import org.junit.Before;
 import org.junit.Test;
@@ -47,17 +48,15 @@ public class JUnitScenarioReporterTest {
 	@Before
 	public void setUp() {
 		MockitoAnnotations.initMocks(this);
-		rootDescription = Description.createTestDescription(this.getClass(),
-				NAME_ROOT);
-		storyDescription = Description.createTestDescription(this.getClass(),
-				NAME_STORY);
+		rootDescription = Description.createSuiteDescription(NAME_ROOT);
+		storyDescription = Description.createSuiteDescription(NAME_STORY);
 		rootDescription.addChild(storyDescription);
 		scenarioDescription = Description.createTestDescription(
 				this.getClass(), NAME_SCENARIO);
 		storyDescription.addChild(scenarioDescription);
 
 		story = new Story();
-		story.namedAs("story(" + this.getClass().getName() + ")");
+		story.namedAs(NAME_STORY);
 		keywords = new Keywords();
 	}
 
@@ -303,7 +302,8 @@ public class JUnitScenarioReporterTest {
 
 	@Test
 	public void shouldFailForPendingStepsAtBothStepAndScenarioLevelsIfConfigurationSaysSo() {
-		Description child = addChildToScenario("child");
+		Description child1 = addChildToScenario("child1");
+		Description child2 = addChildToScenario("child2");
 
 		reporter = new JUnitScenarioReporter(notifier, ONE_STEP,
 				rootDescription, keywords);
@@ -312,14 +312,15 @@ public class JUnitScenarioReporterTest {
 		reporter.usePendingStepStrategy(strategy);
 
 		reportStoryAndScenarioStart(reporter);
-		reporter.pending("child");
-		reporter.failed("child",
+		reporter.pending("child1");
+		reporter.failed("child2",
 				new UUIDExceptionWrapper(new Exception("FAIL")));
 		verifyStoryStarted();
 		verifyScenarioStarted();
-		verify(notifier).fireTestStarted(child);
+		verify(notifier).fireTestStarted(child1);
 		verify(notifier, times(2)).fireTestFailure(Mockito.<Failure> anyObject());
-		verify(notifier, times(2)).fireTestFinished(child);
+		verify(notifier, times(1)).fireTestFinished(child1);
+		verify(notifier, times(1)).fireTestFinished(child2);
 	}
 
 	@Test
@@ -350,6 +351,21 @@ public class JUnitScenarioReporterTest {
 				.forClass(Failure.class);
 		verify(notifier).fireTestFailure(argument.capture());
 		assertThat(argument.getValue().getDescription(), is(storyDescription));
+	}
+
+	@Test
+	public void shouldNotifyAboutNotAllowedScenario() {
+		Description child1 = addChildToScenario("child");
+
+		reporter = new JUnitScenarioReporter(notifier, ONE_STEP,
+				rootDescription, keywords);
+
+		reportStoryAndScenarioStart(reporter);
+		reporter.scenarioNotAllowed(Mockito.mock(Scenario.class), "filter");
+		verifyStoryStarted();
+		verifyScenarioStarted();
+		verify(notifier).fireTestIgnored(child1);
+		verify(notifier).fireTestIgnored(scenarioDescription);
 	}
 
 	private void reportScenarioAndStoryFinish(JUnitScenarioReporter reporter) {
@@ -445,11 +461,9 @@ public class JUnitScenarioReporterTest {
 	}
 
 	private Description addChildToScenario(String childName) {
-
 		Description child = Description.createTestDescription(this.getClass(),
 				childName);
 		scenarioDescription.addChild(child);
 		return child;
 	}
-
 }
